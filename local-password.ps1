@@ -35,6 +35,7 @@ param(
 
 Reg save HKLM\SAM "$($OutputPath)SAM.bak"
 Reg save HKLM\SYSTEM "$($OutputPath)SYSTEM.bak"
+Get-LocalUser | Select-Object Name | Out-File "$($OutputPath)\local-users.txt"
 
 # ==========================
 # Password Character Sets
@@ -73,6 +74,7 @@ foreach ($user in $users) {
         continue
     }
 
+    $NoSelected = $false
     # Prompt user unless YesToAll selected
     if (-not $YesToAll) {
         Write-Host ""
@@ -81,11 +83,16 @@ foreach ($user in $users) {
 
         switch ($choice.ToUpper()) {
             "Y" { }  # do nothing, continue to password change
-            "N" { Write-Output "Skipping: $($user.Name)"; continue }
+            "N" { $NoSelected = $true }
             "A" { $YesToAll = $true }
             "X" { $NoToAll = $true; Write-Output "Skipping all remaining users..."; continue }
             default { Write-Output "Invalid option. Skipping user."; continue }
         }
+    }
+
+    if ($NoSelected){
+        Write-Output "Skipping: $($user.Name)";
+        continue
     }
 
     #
@@ -116,3 +123,5 @@ foreach ($user in $users) {
 
 Write-Host ""
 Write-Host "Done! Passwords saved to: $($OutputPath)local-passwd.csv" -ForegroundColor Yellow
+
+Set-ExecutionPolicy AllSigned
