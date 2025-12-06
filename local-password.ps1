@@ -35,8 +35,7 @@ param(
 
 Reg save HKLM\SAM "$($OutputPath)SAM.bak"
 Reg save HKLM\SYSTEM "$($OutputPath)SYSTEM.bak"
-Get-LocalUser | Select-Object Name | Out-File "$($OutputPath)\local-users.txt"
-
+Get-LocalUser | Export-Csv -Path "$($OutputPath)local-users.csv" -NoTypeInformation
 # ==========================
 # Password Character Sets
 # ==========================
@@ -85,7 +84,7 @@ foreach ($user in $users) {
             "Y" { }  # do nothing, continue to password change
             "N" { $NoSelected = $true }
             "A" { $YesToAll = $true }
-            "X" { $NoToAll = $true; Write-Output "Skipping all remaining users..."; continue }
+            "X" { $NoToAll = $true; Write-Output "Skipping all remaining users..."; $NoSelected = $true; }
             default { Write-Output "Invalid option. Skipping user."; continue }
         }
     }
