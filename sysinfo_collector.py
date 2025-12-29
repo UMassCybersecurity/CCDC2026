@@ -1181,8 +1181,19 @@ class SystemInfoCollector:
         def emit_block(block: Dict[str, Any]) -> None:
             if not block:
                 return
-            lines.append(f"Tool: {block.get('tool', 'unknown')}")
-            lines.append(f"Status: {block.get('status', 'unknown')}")
+            if block.get('tool'):
+                lines.append(f"Tool: {block.get('tool', 'unknown')}")
+            if block.get('status'):
+                lines.append(f"Status: {block.get('status', 'unknown')}")
+            
+            # Handle Windows profiles
+            if block.get("profiles"):
+                lines.append("Profiles:")
+                for profile in block["profiles"]:
+                    profile_name = profile.get("profile", "unknown")
+                    profile_state = profile.get("state", "unknown")
+                    lines.append(f"  {profile_name}: {profile_state}")
+            
             if block.get("rules_full"):
                 lines.append("Rules (full):")
                 lines.extend(block["rules_full"])
@@ -1208,7 +1219,7 @@ class SystemInfoCollector:
             pass
 
     def _get_firewall_status_windows(self) -> Dict[str, Any]:
-        status: Dict[str, Any] = {"profiles": []}
+        status: Dict[str, Any] = {"tool": "Windows Defender Firewall", "profiles": []}
         try:
             result = subprocess.run(
                 ["netsh", "advfirewall", "show", "allprofiles"],
@@ -1218,14 +1229,40 @@ class SystemInfoCollector:
             )
             current_profile = None
             for line in result.stdout.split('\n'):
-                line = line.strip()
-                if line.endswith("Profile Settings"):
-                    current_profile = {"profile": line.replace("Profile Settings", "").strip()}
+                line_stripped = line.strip()
+                # Look for lines like "Domain Profile Settings:" or "Private Profile Settings:"
+                if "Profile Settings:" in line_stripped:
+                    profile_name = line_stripped.replace("Profile Settings:", "").strip()
+                    current_profile = {"profile": profile_name}
                     status["profiles"].append(current_profile)
-                elif line.startswith("State") and current_profile is not None:
-                    current_profile["state"] = line.split()[-1]
+                elif line_stripped.startswith("State") and current_profile is not None:
+                    # Extract the state value (usually "ON" or "OFF")
+                    parts = line_stripped.split()
+                    if len(parts) >= 2:
+                        current_profile["state"] = parts[-1]
         except Exception:
             pass
+
+        # Get firewall rules using PowerShell (better output handling than netsh alone)
+        try:
+            ps_cmd = """netsh advfirewall firewall show rule name=all verbose"""
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_cmd],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            lines = [l for l in result.stdout.split('\n') if l.strip()]
+            if lines and len(lines) > 10:  # Ensure we got actual rule data
+                status["rules_full"] = lines
+                status["status"] = f"rules_present ({len(lines)} lines)"
+            elif lines:
+                status["rules_full"] = lines
+                status["status"] = "partial_rules"
+            else:
+                status["status"] = "no_rules_found"
+        except Exception as e:
+            status["status"] = f"error_fetching_rules: {str(e)}"
 
         return status
 
