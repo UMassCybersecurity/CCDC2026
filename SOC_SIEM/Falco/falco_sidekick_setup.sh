@@ -75,3 +75,13 @@ systemctl daemon-reload
 systemctl enable falcosidekick
 systemctl start falcosidekick
 curl localhost:2801/healthz
+
+
+## to enable it within falco (since we dont have koob), edit falco.yaml file
+: '
+json_output: true
+json_include_output_property: true
+http_output:
+  enabled: true
+  url: "http://localhost:2801/"
+'
