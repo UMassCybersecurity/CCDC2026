@@ -17,6 +17,7 @@ mv falcosidekick /usr/local/bin/
 
 ## Setup config file in /etc/falcosidekick/config.yaml
 
+touch /etc/falcosidekick/config.yaml
 cat > /etc/falcosidekick/config.yaml << 'EOF'
 #listenaddress: "" # ip address to bind falcosidekick to (default: "" meaning all addresses)
 #listenport: 2801 # port to listen for daemon (default: 2801)
