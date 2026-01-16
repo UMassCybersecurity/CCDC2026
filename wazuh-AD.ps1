@@ -7,14 +7,14 @@ if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 # 1. SET VARIABLES
 $managerIp = "10.0.0.2"
 $tempDir   = "$env:TEMP\WazuhInstall"
-New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
+if (!(Test-Path $tempDir)) { New-Item -ItemType Directory -Force -Path $tempDir | Out-Null }
 
 $wazuhMsiUrl = "https://packages.wazuh.com/4.x/windows/wazuh-agent-4.14.1-1.msi"
 $sysmonUrl   = "https://download.sysinternals.com/files/Sysmon.zip"
 $sysmonConf  = "https://raw.githubusercontent.com/SwiftOnSecurity/sysmon-config/master/sysmonconfig-export.xml"
 
 # 2. DOWNLOAD EVERYTHING
-Write-Host "Downloading Wazuh and Sysmon..." -ForegroundColor Cyan
+Write-Host "Downloading Wazuh, Sysmon, and Config..." -ForegroundColor Cyan
 Invoke-WebRequest -Uri $wazuhMsiUrl -OutFile "$tempDir\wazuh-agent.msi"
 Invoke-WebRequest -Uri $sysmonUrl -OutFile "$tempDir\Sysmon.zip"
 Invoke-WebRequest -Uri $sysmonConf -OutFile "$tempDir\sysmonconfig.xml"
@@ -23,12 +23,13 @@ Invoke-WebRequest -Uri $sysmonConf -OutFile "$tempDir\sysmonconfig.xml"
 Write-Host "Installing Wazuh Agent..." -ForegroundColor Cyan
 Start-Process msiexec.exe -ArgumentList "/i `"$tempDir\wazuh-agent.msi`" /q WAZUH_MANAGER=`"$managerIp`"" -Wait
 
-# 4. INSTALL SYSMON (Needed for Part 2 of the AD articles)
+# 4. INSTALL SYSMON
 Write-Host "Installing Sysmon..." -ForegroundColor Cyan
+if (Test-Path "$tempDir\Sysmon") { Remove-Item "$tempDir\Sysmon" -Recurse -Force }
 Expand-Archive -Path "$tempDir\Sysmon.zip" -DestinationPath "$tempDir\Sysmon" -Force
 Start-Process "$tempDir\Sysmon\Sysmon64.exe" -ArgumentList "-accepteula -i `"$tempDir\sysmonconfig.xml`"" -Wait
 
-# 5. ENABLE AD AUDIT POLICIES (Needed for Part 1 of the AD articles)
+# 5. ENABLE AD AUDIT POLICIES
 Write-Host "Enabling Advanced Auditing..." -ForegroundColor Cyan
 auditpol /set /subcategory:"Directory Service Access" /success:enable
 auditpol /set /subcategory:"Kerberos Service Ticket Operations" /success:enable
@@ -43,11 +44,26 @@ $SysmonBlock = @"
     <log_format>eventchannel</log_format>
   </localfile>
 "@
-# Inserts the Sysmon reading block into the ossec.conf file
-(Get-Content $OssecConf) -replace '</ossec_config>', "$SysmonBlock`n</ossec_config>" | Set-Content $OssecConf
 
-# 7. START SERVICES
-Write-Host "Starting Wazuh Service..." -ForegroundColor Cyan
-Restart-Service wazuhsvc  # Use Restart to ensure it picks up the new config
+if (Test-Path $OssecConf) {
+    (Get-Content $OssecConf) -replace '</ossec_config>', "$SysmonBlock`n</ossec_config>" | Set-Content $OssecConf
+}
+
+# 7. SMART SERVICE START/RESTART
+$ServiceName = "wazuhsvc"
+# Get current status, suppressing errors if the service isn't found yet
+$service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+
+if ($service) {
+    if ($service.Status -eq 'Running') {
+        Write-Host "Wazuh is running. Restarting to apply AD and Sysmon config..." -ForegroundColor Yellow
+        Restart-Service $ServiceName
+    } else {
+        Write-Host "Wazuh service found but stopped. Starting now..." -ForegroundColor Green
+        Start-Service $ServiceName
+    }
+} else {
+    Write-Error "Wazuh service not found. The installation may have failed."
+}
 
 Write-Host "AD Hardening & Monitoring Complete!" -ForegroundColor Green
