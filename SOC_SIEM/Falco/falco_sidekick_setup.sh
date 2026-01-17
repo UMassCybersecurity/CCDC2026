@@ -9,14 +9,13 @@ fi
 
 
 VER=$(curl --silent -qI https://github.com/falcosecurity/falcosidekick/releases/latest | awk -F '/' '/^location/ {print  substr($NF, 1, length($NF)-1)}')
-wget -c https://github.com/falcosecurity/falcosidekick/releases/download/${VER}/falcosidekick_${VER}_linux_arm64.tar.gz -O - | tar -xz
-or
 wget -c https://github.com/falcosecurity/falcosidekick/releases/download/${VER}/falcosidekick_${VER}_linux_amd64.tar.gz -O - | tar -xz
 chmod +x falcosidekick
 mv falcosidekick /usr/local/bin/
 
 ## Setup config file in /etc/falcosidekick/config.yaml
 
+mkdir /etc/falcosidekick
 touch /etc/falcosidekick/config.yaml
 cat > /etc/falcosidekick/config.yaml << 'EOF'
 #listenaddress: "" # ip address to bind falcosidekick to (default: "" meaning all addresses)
@@ -49,8 +48,8 @@ tlsserver:
   notlsport: 2810 # port to serve http server serving selected endpoints (default: 2810)
   notlspaths: # if not empty, and tlsserver.deploy is true, a separate http server will be deployed for the specified endpoints
     - "/ping"
-    # - "/metrics"
-    # - "/healthz"
+    - "/metrics"
+    - "/healthz"
 EOF
 
 touch /etc/systemd/system/falcosidekick.service

@@ -2,7 +2,7 @@
 ## run as sudo ./wazuh_agent_setup.sh
 ## Script to setup Wazuh Agent instances
 
-## taken from this https://documentation.wazuh.com/current/installation-guide/wazuh-agent/wazuh-agent-package-linux.html
+## edited from this https://documentation.wazuh.com/current/installation-guide/wazuh-agent/wazuh-agent-package-linux.html
 ## NOTE: For Wazuh setup, make sure these ports are exposed before running script on manager box
 #1514/TCP for agent communication.
 #1515/TCP for enrollment via agent configuration.
