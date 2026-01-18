@@ -1,5 +1,6 @@
-# Modified heavily from https://gitlab.com/nuccdc/tools/-/blob/master/scripts/windows/change-pass.ps1
+#Requires -RunAsAdministrator
 
+# Modified heavily from https://gitlab.com/nuccdc/tools/-/blob/master/scripts/windows/change-pass.ps1
 # NOTES:
 # You can use any dictionary you like so long as its format is some genre of 'words separated by newline characters'
     # I recommend using anything *clean* from https://gist.github.com/atoponce/95c4f36f2bc12ec13242a3ccc55023af
