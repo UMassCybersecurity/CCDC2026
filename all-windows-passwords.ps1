@@ -5,7 +5,7 @@
     # I recommend using anything *clean* from https://gist.github.com/atoponce/95c4f36f2bc12ec13242a3ccc55023af
 
 Write-Host "Make sure you're running this with administrator priviledges!`nBe wary of changing passwords for service accounts."
-Write-Host "This tool needs a wordlist. Run `ncurl -o https://raw.githubusercontent.com/sts10/orchard-street-wordlists/refs/heads/main/lists/orchard-street-alpha.txt before continuing."
+Write-Host "This tool needs a wordlist. Run `curl -o https://raw.githubusercontent.com/sts10/orchard-street-wordlists/refs/heads/main/lists/orchard-street-alpha.txt before continuing."
 # If ye can't run this script in PowerShell, try Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
 
 # DICTIONARY: words must be separated by newlines!
