@@ -1,0 +1,302 @@
+#!/usr/bin/env bash
+
+# ------------ NOTES ------------
+# DISCLAIMER: Mostly vibe coded, because I'm not so good with bash scripts
+#
+# This script downloads .debs and manually compares the checksums of files
+# included in the .deb, comparing them. Warnings should be taken as such--
+# they don't always indicate that a binary has been tampered with. Manually
+# downloading and extracting .debs means that this script functions
+# independently of the dpkg database whose hashes are stored in plaintext.
+#
+# But, it's probably a good idea to run "dpkg -Va" to compare installed
+# packages against the dpkg database as well.
+#
+# ---------- RECIPES ------------
+# ./check_pkg openssh-server
+# ./check_pkg --essentials
+# ./check_pkg --all
+
+set -euo pipefail
+
+# Color setup (suppressed when NO_COLOR is set or stderr is not a TTY)
+COLOR_RESET=""; COLOR_INFO=""; COLOR_WARN=""; COLOR_ERR=""
+if [[ -z "${NO_COLOR:-}" && -t 2 ]]; then
+  COLOR_RESET=$'\033[0m'
+  COLOR_INFO=$'\033[1;34m'
+  COLOR_WARN=$'\033[1;33m'
+  COLOR_ERR=$'\033[1;31m'
+fi
+
+LOG_LEVEL="${LOG_LEVEL:-warn}"  # info|warn|error
+
+info() { [[ "$LOG_LEVEL" != "info" ]] || printf '%s[INFO]%s %s\n' "$COLOR_INFO" "$COLOR_RESET" "$*" >&2; }
+warn() { [[ "$LOG_LEVEL" == "error" ]] || printf '%s[WARN]%s %s\n' "$COLOR_WARN" "$COLOR_RESET" "$*" >&2; }
+err()  { printf '%s[ERROR]%s %s\n' "$COLOR_ERR" "$COLOR_RESET" "$*" >&2; exit 1; }
+
+# Configurable knobs (env overrides)
+IGNORE_MAN_DOC="${IGNORE_MAN_DOC:-1}"
+IGNORE_CONFFILES="${IGNORE_CONFFILES:-1}"
+CHECKSUM_CMD="${CHECKSUM_CMD:-sha256sum}"
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: ./check_pkg <package> [package ...] | --all | --essentials
+  --all         Check every installed package
+  --essentials  Check core/essential packages (Essential=yes, Priority=required, curated set)
+Env:
+  IGNORE_MAN_DOC=0/1 (default 1)
+  IGNORE_CONFFILES=0/1 (default 1)
+  CHECKSUM_CMD=sha256sum|md5sum|...
+  LOG_LEVEL=info|warn|error
+  ESSENTIALS_EXTRA="pkg1 pkg2"  (optional; extend essentials set)
+Requires: apt-get, dpkg, dpkg-deb, find.
+EOF
+  exit 1
+}
+
+# Parse args
+ALL_PACKAGES=0
+ESSENTIALS_MODE=0
+PKG_LIST=()
+while (( $# )); do
+  case "$1" in
+    --all)        ALL_PACKAGES=1; shift ;;
+    --essentials) ESSENTIALS_MODE=1; shift ;;
+    -h|--help)    usage ;;
+    --) shift; PKG_LIST+=("$@"); break ;;
+    -*) usage ;;
+    *)  PKG_LIST+=("$1"); shift ;;
+  esac
+done
+
+if (( ALL_PACKAGES + ESSENTIALS_MODE > 1 )); then
+  err "Choose only one of --all or --essentials (not both)."
+fi
+if (( ESSENTIALS_MODE == 1 && ${#PKG_LIST[@]} > 0 )); then
+  err "--essentials cannot be combined with explicit package names."
+fi
+
+if [[ $ALL_PACKAGES -eq 1 ]]; then
+  mapfile -t PKG_LIST < <(dpkg-query -W -f='${Package}\n' | sort -u)
+elif [[ $ESSENTIALS_MODE -eq 1 ]]; then
+  # Essential: yes
+  mapfile -t PKG_LIST < <(dpkg-query -W -f='${Package} ${Essential}\n' \
+    | awk '$2=="yes"{print $1}' \
+    | sort -u)
+
+  # Priority: required
+  mapfile -t REQ_LIST < <(dpkg-query -W -f='${Package} ${Priority}\n' \
+    | awk '$2=="required"{print $1}' \
+    | sort -u)
+  PKG_LIST+=("${REQ_LIST[@]}")
+
+  # Curated core set (only if installed)
+  CORE_SET="$(cat <<'EOC'
+apt
+aptitude
+base-files
+base-passwd
+bash
+coreutils
+dash
+debconf
+dpkg
+findutils
+grep
+gzip
+hostname
+libc6
+libstdc++6
+login
+mount
+ncurses-bin
+passwd
+perl-base
+procps
+sed
+sysvinit-utils
+tar
+tzdata
+util-linux
+sudo
+openssh-client
+openssh-server
+openssh-sftp-server
+ca-certificates
+openssl
+net-tools
+iproute2
+gnupg
+EOC
+)"
+  for p in $CORE_SET ${ESSENTIALS_EXTRA:-}; do
+    if dpkg-query -W -f='${Status}\n' "$p" 2>/dev/null | grep -q "install ok installed"; then
+      PKG_LIST+=("$p")
+    fi
+  done
+
+  # de-duplicate
+  mapfile -t PKG_LIST < <(printf '%s\n' "${PKG_LIST[@]}" | sort -u)
+
+  if [[ ${#PKG_LIST[@]} -eq 0 ]]; then
+    err "No packages detected for --essentials (none installed from essential/core sets)."
+  else
+    info "Essentials mode: checking ${#PKG_LIST[@]} packages."
+  fi
+elif [[ ${#PKG_LIST[@]} -lt 1 ]]; then
+  usage
+fi
+
+filter_lines() {
+  local ignore_file="$1"
+  if [[ -s "$ignore_file" ]]; then
+    grep -Fv -f "$ignore_file"
+  else
+    cat
+  fi
+}
+
+check_one_package() {
+  local PKG="$1"
+  local WORKDIR
+  WORKDIR="$(mktemp -d)"
+  local status="ok"
+  local INSTALLED_VER=""
+  local INSTALLED_ARCH=""
+
+  cleanup_pkg() { rm -rf "$WORKDIR"; }
+  trap cleanup_pkg RETURN
+
+  # Ensure package is installed
+  if ! dpkg-query -W -f='${Status}\n' "$PKG" 2>/dev/null | grep -q "install ok installed"; then
+    warn "Package $PKG is not installed; skipping."
+    status="skipped"
+  else
+    INSTALLED_VER="$(dpkg-query -W -f='${Version}' "$PKG")"
+    INSTALLED_ARCH="$(dpkg-query -W -f='${Architecture}' "$PKG")"
+
+    info "Checking $PKG (version $INSTALLED_VER, arch $INSTALLED_ARCH)"
+
+    cd "$WORKDIR"
+
+    # Download quietly, capture output for diagnostics
+    local DL_OUTPUT=""
+    if ! DL_OUTPUT="$(apt-get -qq download "${PKG}=${INSTALLED_VER}" 2>&1)"; then
+      warn "Download failed for ${PKG}=${INSTALLED_VER}"
+      warn "apt-get output: ${DL_OUTPUT:-<empty>}"
+      status="failed"
+    else
+      # Find the downloaded .deb (epoch-safe)
+      local DEB_FILE
+      DEB_FILE="$(find "$WORKDIR" -maxdepth 1 -type f -name "${PKG}_*.deb" | head -n1 || true)"
+      if [[ -z "$DEB_FILE" || ! -f "$DEB_FILE" ]]; then
+        warn "Downloaded .deb not found for $PKG (workdir: $WORKDIR)"
+        warn "apt-get output was: ${DL_OUTPUT:-<empty>}"
+        status="failed"
+      else
+        # Metadata sanity check (allow arch=all)
+        local DOWN_VER DOWN_ARCH
+        DOWN_VER="$(dpkg-deb -f "$DEB_FILE" Version)"
+        DOWN_ARCH="$(dpkg-deb -f "$DEB_FILE" Architecture)"
+        if ! { [[ "$DOWN_VER" == "$INSTALLED_VER" ]] && { [[ "$DOWN_ARCH" == "$INSTALLED_ARCH" ]] || [[ "$DOWN_ARCH" == "all" ]] || [[ "$INSTALLED_ARCH" == "all" ]]; }; }; then
+          warn "Metadata mismatch for $PKG: installed=($INSTALLED_VER,$INSTALLED_ARCH) downloaded=($DOWN_VER,$DOWN_ARCH)"
+          status="failed"
+        else
+          # Extract the deb contents
+          local EXTRACT_DIR="$WORKDIR/extracted"
+          mkdir -p "$EXTRACT_DIR"
+          dpkg-deb -x "$DEB_FILE" "$EXTRACT_DIR"
+
+          # Build checksum map for extracted files
+          pushd "$EXTRACT_DIR" >/dev/null
+          find . -type f -print0 | sort -z | xargs -0 "$CHECKSUM_CMD" > "$WORKDIR/deb.sha"
+          popd >/dev/null
+
+          # Normalize deb paths from "./usr/..." to "/usr/..."
+          sed -i 's#^\([0-9a-fA-F]\+\)  \./#\1  /#' "$WORKDIR/deb.sha"
+
+          # Enumerate installed files (regular files only)
+          dpkg -L "$PKG" 2>/dev/null | while read -r f; do
+            [[ -f "$f" ]] && echo "$f"
+          done | sort > "$WORKDIR/installed-files"
+
+          # Compute checksums of installed files
+          while read -r f; do
+            "$CHECKSUM_CMD" "$f"
+          done < "$WORKDIR/installed-files" > "$WORKDIR/installed.sha"
+
+          # Build ignore list
+          local IGNORE_FILE="$WORKDIR/ignore.paths"
+          : > "$IGNORE_FILE"
+          if [[ "$IGNORE_MAN_DOC" -eq 1 ]]; then
+            printf "/usr/share/man/\n/usr/share/doc/\n" >> "$IGNORE_FILE"
+          fi
+          if [[ "$IGNORE_CONFFILES" -eq 1 ]]; then
+            dpkg-query -W -f='${Conffiles}\n' "$PKG" | awk '{print $1}' >> "$IGNORE_FILE"
+          fi
+
+          # Apply filtering to checksum lists
+          filter_lines "$IGNORE_FILE" < "$WORKDIR/deb.sha" > "$WORKDIR/deb.sha.filtered"
+          filter_lines "$IGNORE_FILE" < "$WORKDIR/installed.sha" > "$WORKDIR/installed.sha.filtered"
+
+          # Compare file sets (paths only)
+          awk '{print $2}' "$WORKDIR/deb.sha.filtered" | sort > "$WORKDIR/deb.paths"
+          awk '{print $2}' "$WORKDIR/installed.sha.filtered" | sort > "$WORKDIR/installed.paths"
+
+          if ! diff -u "$WORKDIR/deb.paths" "$WORKDIR/installed.paths" >/dev/null; then
+            local deb_count inst_count
+            deb_count=$(wc -l < "$WORKDIR/deb.paths")
+            inst_count=$(wc -l < "$WORKDIR/installed.paths")
+            warn "File list mismatch for $PKG (after ignores): deb=${deb_count} installed=${inst_count}"
+            warn "First few differences:"
+            diff -u "$WORKDIR/deb.paths" "$WORKDIR/installed.paths" | sed -n '1,20p' >&2
+            status="failed"
+          else
+            # Prepare path-first, hash-second for joining on path
+            awk '{hash=$1; $1=""; sub(/^  */,""); path=$0; print path "\t" hash}' "$WORKDIR/deb.sha.filtered" \
+              | sort -k1,1 > "$WORKDIR/deb.ph"
+            awk '{hash=$1; $1=""; sub(/^  */,""); path=$0; print path "\t" hash}' "$WORKDIR/installed.sha.filtered" \
+              | sort -k1,1 > "$WORKDIR/installed.ph"
+
+            # Compare checksums by path
+            join -t $'\t' -1 1 -2 1 "$WORKDIR/deb.ph" "$WORKDIR/installed.ph" > "$WORKDIR/joined.ph" || true
+
+            local MISMATCH=0
+            while IFS=$'\t' read -r path deb_hash inst_hash; do
+              if [[ "$deb_hash" != "$inst_hash" ]]; then
+                warn "Checksum mismatch for $PKG: $path"
+                MISMATCH=1
+              fi
+            done < "$WORKDIR/joined.ph"
+
+            if [[ $MISMATCH -ne 0 ]]; then
+              status="failed"
+            else
+              info "Integrity check PASSED for $PKG"
+            fi
+          fi
+        fi
+      fi
+    fi
+  fi
+
+  [[ "$status" == "ok" ]] && return 0 || return 1
+}
+
+FAILS=0
+TOTAL=0
+
+for pkg in "${PKG_LIST[@]}"; do
+  TOTAL=$((TOTAL + 1))
+  if ! check_one_package "$pkg"; then
+    FAILS=$((FAILS + 1))
+  fi
+done
+
+if [[ $FAILS -ne 0 ]]; then
+  warn "$FAILS of $TOTAL package checks failed."
+  exit 1
+fi
+info "All $TOTAL package checks passed."
+exit 0
