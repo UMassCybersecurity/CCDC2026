@@ -1,6 +1,7 @@
 ###############################################
 # Windows Target Setup Script for Ansible.
 # Allows WinRM and creates an 'ansible' admin user.
+# BEFORE RUNNING: replace remoteip value with IP of Ansible controller.
 # Run in Administrator PowerShell on each windows target.
 # You will be prompted to enter a password for the ansible user.
 ###############################################
@@ -28,3 +29,4 @@ net localgroup Administrators ansible /add
 [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
 
 Write-Host "WinRM configured and Ansible user ready"
+
