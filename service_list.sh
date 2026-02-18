@@ -16,7 +16,7 @@ manager=$(
 )
 
 if [ "$manager" -eq 1 ]; then
-    systemctl --type=service --state=active list-units
+    systemctl list-units --type=service --all
 elif [ "$manager" -eq 2 ]; then
     service --status-all
 else
