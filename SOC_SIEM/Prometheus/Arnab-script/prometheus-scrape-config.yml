@@ -1,0 +1,108 @@
+# =============================================================================
+# PROMETHEUS SERVER-SIDE CONFIGURATION
+# =============================================================================
+#
+# WHERE TO PUT THIS:
+#   Merge these scrape_configs into your main prometheus.yml file, typically
+#   located at /etc/prometheus/prometheus.yml (Linux) or wherever you
+#   installed Prometheus.
+#
+# After editing, reload Prometheus:
+#   - Send SIGHUP:   kill -HUP $(pidof prometheus)
+#   - Or use the API: curl -X POST http://localhost:9090/-/reload
+#     (requires --web.enable-lifecycle flag on the Prometheus process)
+#
+# Replace <DC_HOSTNAME> with the actual FQDN or IP of your Domain Controller(s).
+# =============================================================================
+
+global:
+  scrape_interval: 30s        # How often to pull metrics (30s is a good default for AD)
+  evaluation_interval: 30s    # How often to evaluate alerting rules
+  scrape_timeout: 15s         # Timeout per scrape
+
+# ---------------------------------------------------------------------------
+# ALERTING - point to your Alertmanager instance(s)
+# ---------------------------------------------------------------------------
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - "localhost:9093"       # Adjust to your Alertmanager address
+
+# ---------------------------------------------------------------------------
+# RULE FILES - path(s) to alerting/recording rule files
+# ---------------------------------------------------------------------------
+rule_files:
+  - "/etc/prometheus/rules/ad_alerts.yml"        # <-- The alert rules file we provide
+  - "/etc/prometheus/rules/windows_alerts.yml"    # <-- Optional: OS-level alerts
+
+# ---------------------------------------------------------------------------
+# SCRAPE CONFIGS
+# ---------------------------------------------------------------------------
+scrape_configs:
+
+  # --------------------------------------------------
+  # 1. WINDOWS EXPORTER (port 9182)
+  #    General OS metrics + AD performance counters
+  #    (the "ad" collector in windows_exporter gives
+  #     replication, LDAP bind, DRA, NTLM/Kerberos stats)
+  # --------------------------------------------------
+  - job_name: "windows_exporter"
+    scrape_interval: 30s
+    static_configs:
+      - targets:
+          - "<DC_HOSTNAME_1>:9182"
+          - "<DC_HOSTNAME_2>:9182"
+        labels:
+          environment: "production"
+          role: "domain_controller"
+
+    # Optional: relabel to extract a cleaner instance name
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: "(.+):\\d+"
+        target_label: instance
+        replacement: "$1"
+
+  # --------------------------------------------------
+  # 2. ACTIVE DIRECTORY EXPORTER (port 9164)
+  #    Dedicated AD metrics: replication partners,
+  #    replication failures, LDAP searches, etc.
+  # --------------------------------------------------
+  - job_name: "ad_exporter"
+    scrape_interval: 60s          # AD replication metrics don't change rapidly
+    scrape_timeout: 30s
+    static_configs:
+      - targets:
+          - "<DC_HOSTNAME_1>:9164"
+          - "<DC_HOSTNAME_2>:9164"
+        labels:
+          environment: "production"
+          role: "domain_controller"
+
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: "(.+):\\d+"
+        target_label: instance
+        replacement: "$1"
+
+  # --------------------------------------------------
+  # 3. ADFS EXPORTER (port 9222)
+  #    AD FS-specific metrics: token requests,
+  #    authentication successes/failures, certificate expiry
+  # --------------------------------------------------
+  - job_name: "adfs_exporter"
+    scrape_interval: 30s
+    static_configs:
+      - targets:
+          - "<ADFS_SERVER_1>:9222"
+          - "<ADFS_SERVER_2>:9222"
+        labels:
+          environment: "production"
+          role: "adfs_server"
+
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: "(.+):\\d+"
+        target_label: instance
+        replacement: "$1"
