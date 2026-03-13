@@ -1,6 +1,8 @@
-#!/usr/bin/env bash
+#!/bin/sh
 #===============================================================================
 #  gitea-restore.sh — Automatically restore the latest Gitea backup
+#
+#  POSIX-compliant shell version  (requires GNU tar for --acls/--xattrs)
 #
 #  1. Finds the newest .tar.gz in the backup directory
 #  2. Reads all paths from the gitea.service unit file
@@ -9,9 +11,9 @@
 #
 #  Usage:  sudo ./gitea-restore.sh
 #
-#  Requires: root
+#  Requires: root, GNU tar
 #===============================================================================
-set -euo pipefail
+set -eu
 
 # ─── CONFIGURATION ───────────────────────────────────────────────────────────
 
@@ -22,37 +24,61 @@ EXTRACT_DIR="/tmp/gitea-restore-$$"
 
 # ─── END CONFIGURATION ──────────────────────────────────────────────────────
 
+# Temp files for restore maps (replace bash arrays)
+# Each line: source<TAB>destination
+RESTORE_FILE_MAP="$(mktemp)"
+RESTORE_DIR_MAP="$(mktemp)"
+
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 log()  { printf '[%s] %s\n' "$(date +%T)" "$*"; }
 die()  { log "ERROR: $*"; exit 1; }
 
 check_file() {
-    local label="$1" path="$2"
-    if [[ -f "$path" ]]; then
-        printf '  %-22s %-50s [FOUND]\n' "$label" "$path"
+    _cf_label="$1"; _cf_path="$2"
+    if [ -f "$_cf_path" ]; then
+        printf '  %-22s %-50s [FOUND]\n' "$_cf_label" "$_cf_path"
         return 0
     else
-        printf '  %-22s %-50s [MISSING]\n' "$label" "$path"
+        printf '  %-22s %-50s [MISSING]\n' "$_cf_label" "$_cf_path"
         return 1
     fi
 }
 check_dir() {
-    local label="$1" path="$2"
-    if [[ -d "$path" ]]; then
-        printf '  %-22s %-50s [FOUND]\n' "$label" "$path"
+    _cd_label="$1"; _cd_path="$2"
+    if [ -d "$_cd_path" ]; then
+        printf '  %-22s %-50s [FOUND]\n' "$_cd_label" "$_cd_path"
         return 0
     else
-        printf '  %-22s %-50s [MISSING]\n' "$label" "$path"
+        printf '  %-22s %-50s [MISSING]\n' "$_cd_label" "$_cd_path"
         return 1
     fi
 }
 
+count_lines() {
+    if [ -s "$1" ]; then
+        wc -l < "$1" | tr -d '[:space:]'
+    else
+        printf '0'
+    fi
+}
+
+cleanup_temp() {
+    rm -f "$RESTORE_FILE_MAP" "$RESTORE_DIR_MAP"
+    if [ -d "$EXTRACT_DIR" ]; then
+        log "Cleaning up temp directory: ${EXTRACT_DIR}"
+        rm -rf "$EXTRACT_DIR"
+    fi
+}
+
+# Clean up temp files on ANY exit (overridden later to also restart Gitea)
+trap 'cleanup_temp' EXIT
+
 # ─── Preflight ───────────────────────────────────────────────────────────────
-[[ $EUID -eq 0 ]]               || die "Must be run as root."
-command -v systemctl &>/dev/null || die "'systemctl' not found."
-command -v tar       &>/dev/null || die "'tar' not found."
-[[ -f "$UNIT_FILE" ]]           || die "Unit file not found: ${UNIT_FILE}"
-[[ -d "$BACKUP_ROOT" ]]         || die "Backup directory not found: ${BACKUP_ROOT}"
+[ "$(id -u)" -eq 0 ]                || die "Must be run as root."
+command -v systemctl >/dev/null 2>&1 || die "'systemctl' not found."
+command -v tar       >/dev/null 2>&1 || die "'tar' not found."
+[ -f "$UNIT_FILE" ]                  || die "Unit file not found: ${UNIT_FILE}"
+[ -d "$BACKUP_ROOT" ]               || die "Backup directory not found: ${BACKUP_ROOT}"
 
 #===============================================================================
 #  PHASE 0 — FIND THE LATEST BACKUP
@@ -65,20 +91,19 @@ echo ""
 
 log "Scanning: ${BACKUP_ROOT}"
 
+# Filenames embed YYYYMMDD-HHMMSS, so reverse lexical sort = newest first
 ARCHIVE_PATH="$(find "$BACKUP_ROOT" -maxdepth 1 -name 'gitea-backup-*.tar.gz' \
-    -type f -printf '%T@\t%p\n' \
-    | sort -rn \
-    | head -1 \
-    | cut -f2)"
+    -type f | sort -r | head -1)"
 
-[[ -n "$ARCHIVE_PATH" && -f "$ARCHIVE_PATH" ]] \
+[ -n "$ARCHIVE_PATH" ] && [ -f "$ARCHIVE_PATH" ] \
     || die "No gitea-backup-*.tar.gz files found in ${BACKUP_ROOT}"
 
-BACKUP_COUNT="$(find "$BACKUP_ROOT" -maxdepth 1 -name 'gitea-backup-*.tar.gz' -type f | wc -l)"
+BACKUP_COUNT="$(find "$BACKUP_ROOT" -maxdepth 1 -name 'gitea-backup-*.tar.gz' \
+    -type f | wc -l | tr -d '[:space:]')"
 ARCHIVE_FILENAME="$(basename "$ARCHIVE_PATH")"
-ARCHIVE_DATE="$(echo "$ARCHIVE_FILENAME" \
-    | grep -Po '\d{8}-\d{6}' \
-    | head -1)" || true
+ARCHIVE_DATE="$(printf '%s\n' "$ARCHIVE_FILENAME" \
+    | sed -n 's/.*\([0-9]\{8\}-[0-9]\{6\}\).*/\1/p' \
+    | head -1)" || ARCHIVE_DATE=""
 ARCHIVE_SIZE="$(du -h "$ARCHIVE_PATH" | cut -f1)"
 
 echo "── Available Backups ─────────────────────"
@@ -86,14 +111,11 @@ echo "  Total backups found : ${BACKUP_COUNT}"
 echo ""
 echo "  Most recent 5:"
 find "$BACKUP_ROOT" -maxdepth 1 -name 'gitea-backup-*.tar.gz' \
-    -type f -printf '%T@\t%p\n' \
-    | sort -rn \
-    | head -5 \
-    | cut -f2 \
-    | while read -r f; do
+    -type f | sort -r | head -5 \
+    | while IFS= read -r f; do
         fname="$(basename "$f")"
         fsize="$(du -h "$f" | cut -f1)"
-        if [[ "$f" == "$ARCHIVE_PATH" ]]; then
+        if [ "$f" = "$ARCHIVE_PATH" ]; then
             echo "    → ${fname}  (${fsize})  ← SELECTED"
         else
             echo "      ${fname}  (${fsize})"
@@ -115,33 +137,46 @@ echo "=========================================="
 echo ""
 
 # ─── Parse systemd unit ─────────────────────────────────────────────────────
-GITEA_WORK_DIR="$(grep -Po '^\s*WorkingDirectory\s*=\s*\K\S+' "$UNIT_FILE" | head -1)"
-[[ -n "$GITEA_WORK_DIR" ]] || die "WorkingDirectory= not found in ${UNIT_FILE}"
+GITEA_WORK_DIR="$(sed -n \
+    's/^[[:space:]]*WorkingDirectory[[:space:]]*=[[:space:]]*\([^[:space:]]*\).*/\1/p' \
+    "$UNIT_FILE" | head -1)"
+[ -n "$GITEA_WORK_DIR" ] || die "WorkingDirectory= not found in ${UNIT_FILE}"
 
-GITEA_WORK_DIR="${GITEA_WORK_DIR%/}"    # ← FIX: strip trailing slash
+GITEA_WORK_DIR="${GITEA_WORK_DIR%/}"    # strip trailing slash
 
-EXEC_LINE="$(grep -Po '^\s*ExecStart\s*=\s*\K.*' "$UNIT_FILE" | head -1)" || true
-RUN_USER="$(grep -Po  '^\s*User\s*=\s*\K\S+'     "$UNIT_FILE" | head -1)" || true
-RUN_GROUP="$(grep -Po '^\s*Group\s*=\s*\K\S+'     "$UNIT_FILE" | head -1)" || true
+EXEC_LINE="$(sed -n \
+    's/^[[:space:]]*ExecStart[[:space:]]*=[[:space:]]*//p' \
+    "$UNIT_FILE" | head -1)" || EXEC_LINE=""
+RUN_USER="$(sed -n \
+    's/^[[:space:]]*User[[:space:]]*=[[:space:]]*\([^[:space:]]*\).*/\1/p' \
+    "$UNIT_FILE" | head -1)" || RUN_USER=""
+RUN_GROUP="$(sed -n \
+    's/^[[:space:]]*Group[[:space:]]*=[[:space:]]*\([^[:space:]]*\).*/\1/p' \
+    "$UNIT_FILE" | head -1)" || RUN_GROUP=""
 
 GITEA_CONF=""
-if [[ -n "$EXEC_LINE" ]]; then
-    GITEA_CONF="$(echo "$EXEC_LINE" \
-        | grep -Po '(--config|-c)\s+\K\S+' \
-        | head -1)" || true
+if [ -n "$EXEC_LINE" ]; then
+    GITEA_CONF="$(printf '%s\n' "$EXEC_LINE" | awk '{
+        for (i = 1; i <= NF; i++) {
+            if ($i == "--config" || $i == "-c") {
+                print $(i+1)
+                exit
+            }
+        }
+    }')" || GITEA_CONF=""
 fi
-if [[ -z "$GITEA_CONF" || ! -f "$GITEA_CONF" ]]; then
+if [ -z "$GITEA_CONF" ] || [ ! -f "$GITEA_CONF" ]; then
     for candidate in \
         "${GITEA_WORK_DIR}/custom/conf/app.ini" \
         "/etc/gitea/app.ini"; do
-        if [[ -f "$candidate" ]]; then
+        if [ -f "$candidate" ]; then
             GITEA_CONF="$candidate"
             break
         fi
     done
 fi
 
-if [[ -z "$GITEA_CONF" ]]; then
+if [ -z "$GITEA_CONF" ]; then
     GITEA_CONF="${GITEA_WORK_DIR}/custom/conf/app.ini"
     log "Config not found on disk — will restore to: ${GITEA_CONF}"
 fi
@@ -170,91 +205,89 @@ echo "  Phase 2: Extract Archive"
 echo "=========================================="
 echo ""
 
-cleanup() {
-    if [[ -d "$EXTRACT_DIR" ]]; then
-        log "Cleaning up temp directory: ${EXTRACT_DIR}"
-        rm -rf "$EXTRACT_DIR"
-    fi
-}
-
 mkdir -p "$EXTRACT_DIR"
 log "Extracting to: ${EXTRACT_DIR}"
 
-tar \
-    --extract \
-    --gzip \
-    --file="$ARCHIVE_PATH" \
-    --directory="$EXTRACT_DIR" \
+# NOTE: --same-owner, --acls, --xattrs are GNU tar extensions
+tar -xzf "$ARCHIVE_PATH" \
+    -C "$EXTRACT_DIR" \
     --same-owner \
     --preserve-permissions \
     --acls \
     --xattrs
 
-INNER_DIR="$(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1 -type d | head -1)"
-[[ -n "$INNER_DIR" && -d "$INNER_DIR" ]] \
+# Find inner directory via POSIX glob (replaces find -mindepth/-maxdepth)
+INNER_DIR=""
+for _entry in "$EXTRACT_DIR"/*; do
+    if [ -d "$_entry" ]; then
+        INNER_DIR="$_entry"
+        break
+    fi
+done
+
+[ -n "$INNER_DIR" ] && [ -d "$INNER_DIR" ] \
     || die "Could not find inner directory in extracted archive."
 log "Extracted contents in: ${INNER_DIR}"
 echo ""
 
 # ─── Build restore map ──────────────────────────────────────────────────────
 echo "── Archive Contents ──────────────────────"
-RESTORE_FILES=()
-RESTORE_DIRS=()
-RESTORE_DESTS=()
 
-if [[ -f "${INNER_DIR}/app.ini" ]]; then
+if [ -f "${INNER_DIR}/app.ini" ]; then
     check_file "app.ini" "${INNER_DIR}/app.ini" || true
-    RESTORE_FILES+=("${INNER_DIR}/app.ini")
-    RESTORE_DESTS+=("${GITEA_CONF}")
+    printf '%s\t%s\n' "${INNER_DIR}/app.ini" "${GITEA_CONF}" >> "$RESTORE_FILE_MAP"
 fi
 
 for dir_name in custom data repositories log; do
-    if [[ -d "${INNER_DIR}/${dir_name}" ]]; then
+    if [ -d "${INNER_DIR}/${dir_name}" ]; then
         check_dir "${dir_name}/" "${INNER_DIR}/${dir_name}" || true
-        RESTORE_DIRS+=("${INNER_DIR}/${dir_name}")
-        RESTORE_DESTS+=("${GITEA_WORK_DIR}/${dir_name}")
+        printf '%s\t%s\n' "${INNER_DIR}/${dir_name}" "${GITEA_WORK_DIR}/${dir_name}" \
+            >> "$RESTORE_DIR_MAP"
     fi
 done
 echo ""
 
-if [[ ${#RESTORE_FILES[@]} -eq 0 && ${#RESTORE_DIRS[@]} -eq 0 ]]; then
-    cleanup
+FILE_RESTORE_COUNT="$(count_lines "$RESTORE_FILE_MAP")"
+DIR_RESTORE_COUNT="$(count_lines "$RESTORE_DIR_MAP")"
+
+if [ "$FILE_RESTORE_COUNT" -eq 0 ] && [ "$DIR_RESTORE_COUNT" -eq 0 ]; then
     die "Archive appears empty — nothing to restore!"
 fi
 
 # ─── Show restore plan ───────────────────────────────────────────────────────
 echo "── Restore Plan ────────────────────────"
 echo ""
-DEST_INDEX=0
 
-if [[ ${#RESTORE_FILES[@]} -gt 0 ]]; then
+if [ "$FILE_RESTORE_COUNT" -gt 0 ]; then
     echo "  Files:"
-    for f in "${RESTORE_FILES[@]}"; do
-        fname="$(basename "$f")"
-        echo "    ${fname}  →  ${RESTORE_DESTS[$DEST_INDEX]}"
-        DEST_INDEX=$((DEST_INDEX + 1))    # ← FIX: safe increment
-    done
+    while IFS="	" read -r src dest; do
+        fname="$(basename "$src")"
+        echo "    ${fname}  →  ${dest}"
+    done < "$RESTORE_FILE_MAP"
 fi
 
-if [[ ${#RESTORE_DIRS[@]} -gt 0 ]]; then
+if [ "$DIR_RESTORE_COUNT" -gt 0 ]; then
     echo "  Directories:"
-    for d in "${RESTORE_DIRS[@]}"; do
-        dname="$(basename "$d")"
-        echo "    ${dname}/  →  ${RESTORE_DESTS[$DEST_INDEX]}"
-        DEST_INDEX=$((DEST_INDEX + 1))    # ← FIX: safe increment
-    done
+    while IFS="	" read -r src dest; do
+        dname="$(basename "$src")"
+        echo "    ${dname}/  →  ${dest}"
+    done < "$RESTORE_DIR_MAP"
 fi
 echo ""
 
 echo "  ⚠  WARNING: This will OVERWRITE existing Gitea files."
 echo "     A pre-restore snapshot will be saved first."
 echo ""
-read -rp "  Proceed with restore? (yes/no): " CONFIRM
-if [[ "${CONFIRM,,}" != "yes" ]]; then
-    log "Restore cancelled by user."
-    cleanup
-    exit 0
-fi
+printf '  Proceed with restore? (yes/no): '
+read -r CONFIRM
+case "$CONFIRM" in
+    [Yy][Ee][Ss])
+        ;;
+    *)
+        log "Restore cancelled by user."
+        exit 0
+        ;;
+esac
 echo ""
 
 #===============================================================================
@@ -268,68 +301,63 @@ echo ""
 log "Stopping ${GITEA_SERVICE} …"
 systemctl stop "${GITEA_SERVICE}" 2>/dev/null || log "Service was already stopped."
 
-trap 'log "Restarting ${GITEA_SERVICE} …"; systemctl start "${GITEA_SERVICE}"; log "Service started."; cleanup' EXIT
+# Override trap: always restart the service AND clean temp files on exit
+trap 'log "Restarting ${GITEA_SERVICE} …"; systemctl start "${GITEA_SERVICE}"; log "Service started."; cleanup_temp' EXIT
 
 # ─── Pre-restore snapshot ────────────────────────────────────────────────────
 PRE_RESTORE_DIR="${GITEA_WORK_DIR}/.pre-restore-$(date +%Y%m%d-%H%M%S)"
 log "Saving pre-restore snapshot: ${PRE_RESTORE_DIR}"
 mkdir -p "$PRE_RESTORE_DIR"
 
-if [[ -f "$GITEA_CONF" ]]; then
+if [ -f "$GITEA_CONF" ]; then
     log "  Snapshotting: ${GITEA_CONF}"
-    cp -a "$GITEA_CONF" "${PRE_RESTORE_DIR}/app.ini"
+    cp -p "$GITEA_CONF" "${PRE_RESTORE_DIR}/app.ini"
 fi
 
 for dir_name in custom data repositories; do
     src="${GITEA_WORK_DIR}/${dir_name}"
-    if [[ -d "$src" ]]; then
+    if [ -d "$src" ]; then
         log "  Snapshotting: ${src}"
-        cp -a "$src" "${PRE_RESTORE_DIR}/${dir_name}"
+        cp -pR "$src" "${PRE_RESTORE_DIR}/${dir_name}"
     fi
 done
 log "Pre-restore snapshot saved."
 echo ""
 
 # ─── Restore files ───────────────────────────────────────────────────────────
-DEST_INDEX=0
-
-for f in "${RESTORE_FILES[@]}"; do
-    dest="${RESTORE_DESTS[$DEST_INDEX]}"
+while IFS="	" read -r src dest; do
     dest_dir="$(dirname "$dest")"
 
-    if [[ ! -d "$dest_dir" ]]; then
+    if [ ! -d "$dest_dir" ]; then
         log "Creating directory: ${dest_dir}"
         mkdir -p "$dest_dir"
     fi
 
-    log "Restoring file: $(basename "$f")  →  ${dest}"
-    cp -a "$f" "$dest"
-    DEST_INDEX=$((DEST_INDEX + 1))    # ← FIX: safe increment
-done
+    log "Restoring file: $(basename "$src")  →  ${dest}"
+    cp -p "$src" "$dest"
+done < "$RESTORE_FILE_MAP"
 
 # ─── Restore directories ─────────────────────────────────────────────────────
-for d in "${RESTORE_DIRS[@]}"; do
-    dest="${RESTORE_DESTS[$DEST_INDEX]}"
-    dir_name="$(basename "$d")"
+while IFS="	" read -r src dest; do
+    dir_name="$(basename "$src")"
 
-    if [[ -d "$dest" ]]; then
+    if [ -d "$dest" ]; then
         log "Removing old: ${dest}"
         rm -rf "$dest"
     fi
 
     log "Restoring dir:  ${dir_name}/  →  ${dest}"
-    cp -a "$d" "$dest"
-    DEST_INDEX=$((DEST_INDEX + 1))    # ← FIX: safe increment
-done
+    cp -pR "$src" "$dest"
+done < "$RESTORE_DIR_MAP"
 echo ""
 
 # ─── Fix ownership ───────────────────────────────────────────────────────────
-if [[ -n "$RUN_USER" && -n "$RUN_GROUP" ]]; then
+if [ -n "$RUN_USER" ] && [ -n "$RUN_GROUP" ]; then
     log "Ensuring ownership: ${RUN_USER}:${RUN_GROUP}"
     chown -R "${RUN_USER}:${RUN_GROUP}" "${GITEA_WORK_DIR}"
     chown -R "${RUN_USER}:${RUN_GROUP}" "$(dirname "$GITEA_CONF")"
     log "Ownership set."
-elif [[ -n "$RUN_USER" ]]; then
+elif [ -n "$RUN_USER" ]; then
     log "Ensuring ownership: ${RUN_USER}"
     chown -R "${RUN_USER}" "${GITEA_WORK_DIR}"
     chown -R "${RUN_USER}" "$(dirname "$GITEA_CONF")"
