@@ -1,0 +1,26 @@
+
+  - job_name: 'windows_ad_unknown'
+    static_configs:
+      - targets: ['10.20.30.40:9182']
+    metrics_path: /metrics
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    # Windows AD specific labels
+    labels:
+      job_type: 'windows_ad'
+      environment: 'production'
+      location: 'unknown'
+      exporter_type: 'windows_exporter'
+
+  - job_name: 'adfs_unknown'
+    static_configs:
+      - targets: ['10.30.40.50:9182']
+    metrics_path: /metrics
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    # ADFS specific labels
+    labels:
+      job_type: 'adfs'
+      environment: 'production'
+      location: 'unknown'
+      exporter_type: 'windows_exporter'

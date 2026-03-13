@@ -1,0 +1,352 @@
+# =============================================================================
+# PROMETHEUS ALERTING RULES FOR ACTIVE DIRECTORY & ADFS
+# =============================================================================
+#
+# WHERE TO SAVE THIS FILE:
+#   /etc/prometheus/rules/ad_alerts.yml
+#
+#   This path must match what is declared in the "rule_files:" section of your
+#   prometheus.yml. The /etc/prometheus/rules/ directory must exist:
+#     sudo mkdir -p /etc/prometheus/rules
+#     sudo chown prometheus:prometheus /etc/prometheus/rules
+#
+# AFTER SAVING:
+#   Validate syntax:  promtool check rules /etc/prometheus/rules/ad_alerts.yml
+#   Reload Prometheus: kill -HUP $(pidof prometheus)
+#                  or: curl -X POST http://localhost:9090/-/reload
+#
+# =============================================================================
+
+groups:
+
+  # =========================================================================
+  # GROUP 1: DOMAIN CONTROLLER HEALTH (from windows_exporter "ad" collector)
+  # =========================================================================
+  - name: ad_domain_controller_health
+    interval: 30s
+    rules:
+
+      # ---------------------------------------------------------------
+      # AD Replication Failures
+      # Metric: windows_ad_replication_sync_requests_failures_total
+      # Fires when replication failures are increasing.
+      # ---------------------------------------------------------------
+      - alert: ADReplicationFailure
+        expr: rate(windows_ad_replication_sync_requests_failures_total[10m]) > 0
+        for: 10m
+        labels:
+          severity: critical
+          category: active_directory
+        annotations:
+          summary: "AD replication failures detected on {{ $labels.instance }}"
+          description: |
+            Replication sync failures are occurring at a rate of {{ $value | printf "%.2f" }}/sec
+            over the last 10 minutes. This can lead to inconsistent directory data across
+            domain controllers. Check repadmin /showrepl for details.
+
+      # ---------------------------------------------------------------
+      # AD Replication Pending Synchronizations
+      # Fires when objects are queued for replication for too long.
+      # ---------------------------------------------------------------
+      - alert: ADReplicationPendingHigh
+        expr: windows_ad_replication_pending_synchronizations > 50
+        for: 15m
+        labels:
+          severity: warning
+          category: active_directory
+        annotations:
+          summary: "High pending AD replication on {{ $labels.instance }}"
+          description: |
+            {{ $value }} replication operations are pending for over 15 minutes.
+            This may indicate network issues or an overloaded DC.
+
+      # ---------------------------------------------------------------
+      # LDAP Bind Time (Slow Binds)
+      # Metric: windows_ad_binds_total rate vs windows_ad_ldap_successful_binds_total
+      # Fires when LDAP operations are slow.
+      # ---------------------------------------------------------------
+      - alert: ADLDAPBindTimeSlow
+        expr: windows_ad_ldap_active_threads > 20
+        for: 10m
+        labels:
+          severity: warning
+          category: active_directory
+        annotations:
+          summary: "High LDAP thread count on {{ $labels.instance }}"
+          description: |
+            {{ $value }} active LDAP threads detected. This may indicate slow LDAP
+            queries or excessive client load on the domain controller.
+
+      # ---------------------------------------------------------------
+      # LDAP Search Rate Spike
+      # Fires on sudden spike in LDAP searches (possible enumeration).
+      # ---------------------------------------------------------------
+      - alert: ADLDAPSearchRateSpike
+        expr: rate(windows_ad_ldap_searches_total[5m]) > 1000
+        for: 5m
+        labels:
+          severity: warning
+          category: active_directory
+        annotations:
+          summary: "Abnormal LDAP search rate on {{ $labels.instance }}"
+          description: |
+            LDAP searches are running at {{ $value | printf "%.0f" }}/sec, which is
+            unusually high. Investigate for possible LDAP enumeration or misconfigured
+            applications.
+
+      # ---------------------------------------------------------------
+      # Kerberos Authentication Failures
+      # Metric: windows_ad_kerberos_authentications_total with failure tracking
+      # ---------------------------------------------------------------
+      - alert: ADKerberosAuthFailures
+        expr: rate(windows_ad_kerberos_authentications_total{result="failure"}[10m]) > 10
+        for: 10m
+        labels:
+          severity: warning
+          category: active_directory
+        annotations:
+          summary: "Kerberos authentication failures elevated on {{ $labels.instance }}"
+          description: |
+            Kerberos auth failures running at {{ $value | printf "%.1f" }}/sec.
+            This could indicate brute-force attacks, expired passwords, or clock skew issues.
+
+      # ---------------------------------------------------------------
+      # NTLM Authentication Rate High
+      # NTLM is legacy and should be declining. High rates may indicate
+      # legacy apps or downgrade attacks.
+      # ---------------------------------------------------------------
+      - alert: ADNTLMAuthRateHigh
+        expr: rate(windows_ad_ntlm_authentications_total[10m]) > 100
+        for: 15m
+        labels:
+          severity: info
+          category: active_directory
+        annotations:
+          summary: "High NTLM authentication rate on {{ $labels.instance }}"
+          description: |
+            NTLM authentications at {{ $value | printf "%.0f" }}/sec. Consider investigating
+            which applications are using NTLM instead of Kerberos.
+
+      # ---------------------------------------------------------------
+      # DRA (Directory Replication Agent) Inbound Object Updates
+      # Unusually high rates may indicate bulk changes or attack.
+      # ---------------------------------------------------------------
+      - alert: ADDRAInboundObjectsHigh
+        expr: rate(windows_ad_dra_inbound_objects_applied_total[10m]) > 500
+        for: 10m
+        labels:
+          severity: warning
+          category: active_directory
+        annotations:
+          summary: "High DRA inbound object rate on {{ $labels.instance }}"
+          description: |
+            {{ $value | printf "%.0f" }} objects/sec being replicated inbound.
+            Verify whether a legitimate bulk operation is in progress.
+
+      # ---------------------------------------------------------------
+      # Domain Controller Not Advertising
+      # The DC should always be advertising its services.
+      # ---------------------------------------------------------------
+      - alert: ADDCNotAdvertising
+        expr: windows_ad_is_dc_advertising == 0
+        for: 5m
+        labels:
+          severity: critical
+          category: active_directory
+        annotations:
+          summary: "Domain Controller {{ $labels.instance }} is NOT advertising"
+          description: |
+            The DC has stopped advertising. Clients cannot locate this DC via DNS/LDAP.
+            Run dcdiag /v immediately.
+
+  # =========================================================================
+  # GROUP 2: WINDOWS OS-LEVEL ALERTS (critical for DC health)
+  # =========================================================================
+  - name: ad_windows_os_health
+    interval: 30s
+    rules:
+
+      # ---------------------------------------------------------------
+      # DC Service Not Running
+      # Critical AD services that must always be running.
+      # ---------------------------------------------------------------
+      - alert: ADCriticalServiceDown
+        expr: |
+          windows_service_state{name=~"ntds|dns|kdc|netlogon|dfsr|w32time", state="running"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          category: active_directory
+        annotations:
+          summary: "Critical AD service {{ $labels.name }} is down on {{ $labels.instance }}"
+          description: |
+            The service '{{ $labels.name }}' is not running. This directly impacts
+            Active Directory functionality. Restart the service immediately.
+
+      # ---------------------------------------------------------------
+      # High CPU on Domain Controller
+      # ---------------------------------------------------------------
+      - alert: DCHighCPU
+        expr: 100 - (avg by (instance) (rate(windows_cpu_time_total{mode="idle"}[5m])) * 100) > 90
+        for: 15m
+        labels:
+          severity: warning
+          category: infrastructure
+        annotations:
+          summary: "DC {{ $labels.instance }} CPU usage above 90%"
+          description: "CPU has been above 90% for 15 minutes. AD performance may be degraded."
+
+      # ---------------------------------------------------------------
+      # Low Disk Space on NTDS/SYSVOL Volume
+      # ---------------------------------------------------------------
+      - alert: DCLowDiskSpace
+        expr: |
+          100 - (windows_logical_disk_free_bytes / windows_logical_disk_size_bytes * 100) > 90
+        for: 10m
+        labels:
+          severity: critical
+          category: infrastructure
+        annotations:
+          summary: "Disk {{ $labels.volume }} on {{ $labels.instance }} is over 90% full"
+          description: |
+            Only {{ $value | printf "%.1f" }}% used. If NTDS.dit or SYSVOL volumes
+            run out of space, AD will stop functioning.
+
+      # ---------------------------------------------------------------
+      # Windows Time Service Drift
+      # Clock skew > 5 minutes breaks Kerberos authentication.
+      # ---------------------------------------------------------------
+      - alert: DCTimeSkew
+        expr: abs(windows_time_computed_time_offset_seconds) > 120
+        for: 5m
+        labels:
+          severity: critical
+          category: active_directory
+        annotations:
+          summary: "Time skew detected on {{ $labels.instance }}"
+          description: |
+            Clock offset is {{ $value | printf "%.0f" }} seconds. Kerberos allows a
+            maximum 5-minute skew by default. Authentication WILL fail if this grows.
+            Check w32tm /query /status.
+
+      # ---------------------------------------------------------------
+      # DC Memory Pressure
+      # ---------------------------------------------------------------
+      - alert: DCHighMemoryUsage
+        expr: |
+          (1 - windows_os_physical_memory_free_bytes / windows_cs_physical_memory_bytes) * 100 > 95
+        for: 15m
+        labels:
+          severity: warning
+          category: infrastructure
+        annotations:
+          summary: "DC {{ $labels.instance }} memory usage above 95%"
+          description: "LSASS and NTDS can consume significant memory under load."
+
+  # =========================================================================
+  # GROUP 3: ADFS ALERTS (from adfs_exporter)
+  # =========================================================================
+  - name: adfs_health
+    interval: 30s
+    rules:
+
+      # ---------------------------------------------------------------
+      # ADFS Token Request Failures
+      # ---------------------------------------------------------------
+      - alert: ADFSTokenRequestFailures
+        expr: rate(adfs_token_requests_total{status="failure"}[10m]) > 5
+        for: 10m
+        labels:
+          severity: warning
+          category: adfs
+        annotations:
+          summary: "ADFS token request failures elevated on {{ $labels.instance }}"
+          description: |
+            Token request failures at {{ $value | printf "%.1f" }}/sec. Users may be
+            unable to authenticate to federated applications.
+
+      # ---------------------------------------------------------------
+      # ADFS Extranet Lockouts (possible brute force)
+      # ---------------------------------------------------------------
+      - alert: ADFSExtranetLockouts
+        expr: rate(adfs_extranet_lockouts_total[10m]) > 10
+        for: 5m
+        labels:
+          severity: critical
+          category: adfs
+        annotations:
+          summary: "High ADFS extranet lockout rate on {{ $labels.instance }}"
+          description: |
+            {{ $value | printf "%.1f" }} lockouts/sec detected. This is a strong
+            indicator of a password spray or brute-force attack against the extranet
+            endpoint. Review ADFS audit logs and consider blocking source IPs.
+
+      # ---------------------------------------------------------------
+      # ADFS Certificate Expiring
+      # ---------------------------------------------------------------
+      - alert: ADFSCertificateExpiring
+        expr: (adfs_certificate_expiry_timestamp_seconds - time()) / 86400 < 30
+        for: 1h
+        labels:
+          severity: warning
+          category: adfs
+        annotations:
+          summary: "ADFS certificate expiring in {{ $value | printf \"%.0f\" }} days on {{ $labels.instance }}"
+          description: |
+            An ADFS certificate (token signing or token decrypting) will expire in
+            less than 30 days. Renew it before expiry to avoid authentication outages.
+
+      # ---------------------------------------------------------------
+      # ADFS Service Unavailable
+      # ---------------------------------------------------------------
+      - alert: ADFSServiceDown
+        expr: up{job="adfs_exporter"} == 0
+        for: 3m
+        labels:
+          severity: critical
+          category: adfs
+        annotations:
+          summary: "ADFS exporter unreachable on {{ $labels.instance }}"
+          description: |
+            The ADFS exporter has been unreachable for 3 minutes. Either the exporter
+            service crashed or the ADFS server is down. Federated authentication is
+            likely impacted.
+
+  # =========================================================================
+  # GROUP 4: EXPORTER HEALTH (meta-monitoring)
+  # =========================================================================
+  - name: exporter_health
+    interval: 30s
+    rules:
+
+      - alert: WindowsExporterDown
+        expr: up{job="windows_exporter"} == 0
+        for: 3m
+        labels:
+          severity: critical
+          category: monitoring
+        annotations:
+          summary: "windows_exporter unreachable on {{ $labels.instance }}"
+          description: "Cannot scrape metrics. The exporter service may have stopped."
+
+      - alert: ADExporterDown
+        expr: up{job="ad_exporter"} == 0
+        for: 5m
+        labels:
+          severity: warning
+          category: monitoring
+        annotations:
+          summary: "AD exporter unreachable on {{ $labels.instance }}"
+          description: "Cannot scrape AD metrics. Check the ad_exporter service."
+
+      - alert: ExporterScrapeSlow
+        expr: scrape_duration_seconds > 30
+        for: 10m
+        labels:
+          severity: warning
+          category: monitoring
+        annotations:
+          summary: "Slow scrape on {{ $labels.instance }} ({{ $labels.job }})"
+          description: |
+            Scrape is taking {{ $value | printf "%.1f" }}s. The exporter may be
+            overloaded or the target host is under heavy load.
