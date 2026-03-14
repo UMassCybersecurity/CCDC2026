@@ -44,6 +44,9 @@ def parse_wp_config(config_path):
         match = re.search(rf"define\s*\(\s*['\"]({key})['\"]\s*,\s*getenv_docker\s*\([^,]+,\s*['\"]([^'\"]*)['\"]", content)
         if match:
             return match.group(2)
+        match = re.search(rf"define\s*\(\s*['\"]({key})['\"]\s*,.*getenv\s*\(\s*['\"]([^'\"]*)['\"]", content)
+        if match:
+            return os.environ.get(match.group(2), "")
         return ""
 
     db_host = extract_define("DB_HOST") or "localhost"
@@ -210,8 +213,12 @@ def restore_files(backup_dir, target_path):
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
     with tarfile.open(tarball, "r:gz") as tar:
-        root_dir = tar.getnames()[0].split('/')[0]
-        tar.extractall(target_path.parent)
+        names = tar.getnames()
+        if not names:
+            log_error("Tarball is empty")
+            return False
+        root_dir = names[0].split('/')[0]
+        tar.extractall(target_path.parent, filter='data')
 
     extracted_path = target_path.parent / root_dir
     if extracted_path != target_path:
